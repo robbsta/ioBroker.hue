@@ -339,12 +339,17 @@ adapter.on('stateChange', (id, state) => {
             }
 
             if (obj.common.role === 'LightGroup' || obj.common.role === 'Room') {
-                // log final changes / states
-                adapter.log.debug('final groupLightState for ' + obj.common.name + ':' + JSON.stringify(finalLS));
+                if (!adapter.config.ignoreGroups) {
+                  // log final changes / states
+                  adapter.log.debug('final groupLightState for ' + obj.common.name + ':' + JSON.stringify(finalLS));
 
-                setGroupState({id: groupIds[id], name: obj.common.name}, lightState);
-            } else
-            if (obj.common.role === 'switch') {
+                  submitHueCmd('setGroupLightState', {id: groupIds[id], data: lightState, prio: 1}, (err, result) => {
+                    setTimeout(updateGroupState, 150, {id: groupIds[id], name: obj.common.name}, 3, (err, result) => {
+                      adapter.log.debug('updated group state(' + groupIds[id] + ') after change');
+                    });
+                  });
+                }
+            } else if (obj.common.role === 'switch') {
                 if (finalLS.hasOwnProperty('on')) {
                     finalLS = {on:finalLS.on};
                     // log final changes / states
@@ -353,7 +358,11 @@ adapter.on('stateChange', (id, state) => {
                     lightState = hue.lightState.create();
                     lightState.on(finalLS.on);
 
-                    setLightState({id: channelIds[id], name: obj.common.name}, lightState);
+                    submitHueCmd('setLightState', {id: channelIds[id], data: lightState, prio: 1}, (err, result) => {
+                      setTimeout(updateLightState, 150, {id: channelIds[id], name: obj.common.name}, 3, (err, result) => {
+                        adapter.log.debug('updated lighstate(' + channelIds[id] + ') after change');
+                      });
+                    });
                 } else {
                     adapter.log.warn('invalid switch operation');
                 }
@@ -361,7 +370,11 @@ adapter.on('stateChange', (id, state) => {
                 // log final changes / states
                 adapter.log.debug('final lightState for ' + obj.common.name + ':' + JSON.stringify(finalLS));
 
-                setLightState({id: channelIds[id], name: obj.common.name}, lightState);
+                submitHueCmd('setLightState', {id: channelIds[id], data: lightState, prio: 1}, (err, result) => {
+                  setTimeout(updateLightState, 150, {id: channelIds[id], name: obj.common.name}, 3, (err, result) => {
+                    adapter.log.debug('updated lighstate(' + channelIds[id] + ') after change');
+	                });
+                });
             }
         });
     });
@@ -439,25 +452,35 @@ let pollLights     = [];
 let pollSensors    = [];
 let pollGroups     = [];
 
-function getGroupState(id, prio, callback) {
-  groupQueue.submit({priority: prio}, (args, cb) => {
-    adapter.log.info('executing getGroup(' + JSON.stringify(args) + ')');
-    api.getGroup(args[0], (err, result) => {
-      cb && cb(err, result);
-    });
-  }, [id], (err, result) => {
-    adapter.log.info('getGroup ' + id + ' result: ' + JSON.stringify(result));
+function submitHueCmd(cmd, args, callback) {
+  let queue = lightQueue;
+  if (cmd === 'getGroup' || cmd === 'setGroupLightState')
+    queue = groupQueue;
+
+  queue.submit({priority: args.prio}, (arg, cb) => {
+    adapter.log.debug('executing ' + cmd + '(' + JSON.stringify(arg) + ')');
+    if (arg.data !== undefined) {
+      api[cmd](arg.id, arg.data, (err, result) => {
+        cb && cb(err, result);
+      });
+    } else {
+      api[cmd](arg.id, (err, result) => {
+        cb && cb(err, result);
+      });
+    }
+  }, args, (err, result) => {
+    adapter.log.debug(cmd + '(' + args.id + ') result: ' + JSON.stringify(result));
     if (err || !result)
-      adapter.log.error('getGroup ' + id + ' error: ' + err);
+      adapter.log.error(cmd + '('  + args.id + ') error: ' + err);
     else
-      callback(err, result);
+      callback && callback(err, result);
   });
 }
 
 function updateGroupState(group, prio, callback) {
-  adapter.log.info('polling group ' + group.name + ' (' + group.id + ') with prio ' + prio);
+  adapter.log.debug('polling group ' + group.name + ' (' + group.id + ') with prio ' + prio);
 
-  getGroupState(group.id, prio, (err, result) => {
+  submitHueCmd('getGroup', {id: group.id, prio: prio}, (err, result) => {
     let values = [];
     let states = {};
     for (let stateA in result.lastAction) {
@@ -495,40 +518,10 @@ function updateGroupState(group, prio, callback) {
   });
 }
 
-function setGroupState(group, prio, lightState, callback) {
-  groupQueue.submit({priority: prio}, (args, cb) => {
-    adapter.log.info('executing setGroupLightState(' + JSON.stringify(args) + ')');
-    api.setGroupLightState(args[0], args[1], (err, result) => {
-      cb && cb(err, result);
-    });
-  }, [group.id, lightState], (err, result) => {
-    adapter.log.info('setGroupLightState ' + group.id + ' result: ' + JSON.stringify(result));
-    if (err || !result)
-      adapter.log.error('setGroupLightState ' + group.id + ' error: ' + err);
-    else
-      setTimeout(updateGroupState, 150, {id: group.id, name: group.name}, 3, callback);
-  });
-}
-
-function getLightState(id, prio, callback) {
-  lightQueue.submit({priority: prio}, (args, cb) => {
-    adapter.log.info('executing lightStatus(' + JSON.stringify(args) + ')');
-    api.lightStatus(args[0], (err, result) => {
-      cb && cb(err, result);
-    });
-  }, [id], (err, result) => {
-    adapter.log.info('lightStatus ' + id + ' result: ' + JSON.stringify(result));
-    if (err || !result)
-      adapter.log.error('lightStatus ' + id + ' error: ' + err);
-    else
-      callback(err, result);
-  });
-}
-
 function updateLightState(light, prio, callback) {
-  adapter.log.info('polling light ' + light.name + ' (' + light.id + ') with prio ' + prio);
+  adapter.log.debug('polling light ' + light.name + ' (' + light.id + ') with prio ' + prio);
 
-  getLightState(light.id, prio, (err, result) => {
+  submitHueCmd('lightStatus', {id: light.id, prio: prio}, (err, result) => {
     let values = [];
     let states = {};
     for (let stateA in result.state) {
@@ -566,50 +559,19 @@ function updateLightState(light, prio, callback) {
         values.push({id: adapter.namespace + '.' + light.name + '.' + stateB, val: states[stateB]});
     }
 
-    //adapter.log.info('final states: ' + JSON.stringify(values));
     syncStates(values, true, callback);
   });
 }
 
-function setLightState(light, lightState, callback) {
-  lightQueue.submit({priority: 1}, (args, cb) => {
-    adapter.log.info('executing setLightState(' + JSON.stringify(args) + ')');
-    api.setLightState(args[0], args[1], (err, result) => {
-      cb && cb(err, result);
-    });
-  }, [light.id, lightState], (err, result) => {
-    adapter.log.info('setLightState ' + light.id + ' result: ' + JSON.stringify(result));
-    if (err || !result)
-      adapter.log.error('setLightState ' + light.id + ' error: ' + err);
-    else {
-      setTimeout(updateLightState, 150, {id: light.id, name: light.name}, 3, callback);
-    }
-  });
-}
-
-function getSensorState(id, prio, callback) {
-  lightQueue.submit({priority: prio}, (args, cb) => {
-    adapter.log.info('executing sensorStatus(' + JSON.stringify(args) + ')');
-    api.sensorStatus(args[0], (err, result) => {
-      cb && cb(err, result);
-    });
-  }, [id], (err, result) => {
-    adapter.log.info('sensorStatus ' + id + ' result: ' + JSON.stringify(result));
-    if (err || !result)
-      adapter.log.error('sensorStatus ' + id + ' error: ' + err);
-    else
-      callback(err, result);
-  });
-}
-
 function updateSensorState(sensor, prio, callback) {
-  adapter.log.info('polling sensor ' + sensor.name + ' (' + sensor.id + ') with prio ' + prio);
+  adapter.log.debug('polling sensor ' + sensor.name + ' (' + sensor.id + ') with prio ' + prio);
 
-  getSensorState(sensor.id, prio, (err, result) => {
+  submitHueCmd('sensorStatus', {id: sensor.id, prio: prio}, (err, result) => {
     let channelName = config.config.name + '.' + sensor.name;
 
-    for (let state in sensor.state) {
-        if (!sensor.state.hasOwnProperty(state)) {
+    let sensorCopy = JSON.parse(JSON.stringify(sensor));
+    for (let state in Object.assign(sensorCopy.state, sensorCopy.config)) {
+        if (!sensorCopy.state.hasOwnProperty(state)) {
             continue;
         }
         let objId = channelName + '.' + state;
@@ -626,7 +588,7 @@ function updateSensorState(sensor, prio, callback) {
                 id:     sid
             }
         };
-        var value = sensor.state[state];
+        var value = sensorCopy.state[state];
         if (state === 'temperature') {
           value = convertTemperature(value);
         }
@@ -641,11 +603,12 @@ function updateSensorState(sensor, prio, callback) {
 function connect(cb) {
     api.getFullState((err, config) => {
         if (err) {
-            adapter.log.warn('could not connect to ip');
+            adapter.log.warn('could not connect to HUE bridge (' + adapter.config.bridge + ':' + adapter.config.port + ')');
+            adapter.log.error(err);
             setTimeout(connect, 5000, cb);
             return;
         } else if (!config) {
-            adapter.log.warn('Cannot get the configuration from hue bridge');
+            adapter.log.warn('could not get configuration from HUE bridge (' + adapter.config.bridge + ':' + adapter.config.port + ')');
             setTimeout(connect, 5000, cb);
             return;
         }
@@ -653,11 +616,8 @@ function connect(cb) {
         let channelNames = [];
 
         // Create/update lamps
-        adapter.log.info('creating/updating switch channels');
-
         let lights  = config.lights;
         let sensors = config.sensors;
-        let count   = 0;
         let objs    = [];
         let states  = [];
 
@@ -666,24 +626,31 @@ function connect(cb) {
                 continue;
             }
 
-            count++;
             let sensor = sensors[sid];
 
-            let channelName = config.config.name + '.' + sensor.name;
-            if (channelNames.indexOf(channelName) !== -1) {
-                adapter.log.warn('channel "' + channelName + '" already exists, skipping lamp');
-                continue;
-            } else {
-                channelNames.push(channelName);
-            }
-
             if (sensor.type === 'ZLLSwitch' || sensor.type === 'ZGPSwitch' || sensor.type=='Daylight' || sensor.type=='ZLLTemperature' || sensor.type=='ZLLPresence' || sensor.type=='ZLLLightLevel') {
+
+               let channelName = config.config.name + '.' + sensor.name;
+               if (channelNames.indexOf(channelName) !== -1) {
+	           let newChannelName = channelName + ' ' + sensor.type;
+	           if (channelNames.indexOf(newChannelName) !== -1) {
+                     adapter.log.error('channel "' + channelName.replace(/\s/g, '_') + '" already exists, could not use "' + newChannelName.replace(/\s/g, '_') + '" as well, skipping sensor ' + sid);
+                     continue;
+                   } else {
+                     adapter.log.warn('channel "' + channelName.replace(/\s/g, '_') + '" already exists, using "' + newChannelName.replace(/\s/g, '_') + '" for sensor ' + sid);
+                     channelName = newChannelName;
+                   }
+               } else {
+                   channelNames.push(channelName);
+               }
+
                let sensorName =  sensor.name.replace(/\s/g, '');
 
                pollSensors.push({id: sid, name: channelName.replace(/\s/g, '_'), sname: sensorName});
                
-               for (let state in sensor.state) {
-                  if (!sensor.state.hasOwnProperty(state)) {
+	       let sensorCopy = JSON.parse(JSON.stringify(sensor));
+               for (let state in Object.assign(sensorCopy.state, sensorCopy.config)) {
+                  if (!sensorCopy.state.hasOwnProperty(state)) {
                       continue;
                   }
                   let objId = channelName  + '.' + state;
@@ -701,6 +668,8 @@ function connect(cb) {
                       }
                   };
   
+                  var value = sensorCopy.state[state];
+
                   switch (state) {
                       case 'on':
                           lobj.common.type = 'boolean';
@@ -748,6 +717,7 @@ function connect(cb) {
                       case 'temperature':
                       	lobj.common.type = 'number';
                       	lobj.common.role = 'indicator.temperature';
+                        value = convertTemperature(value);
                       	break;
                 
                       default:
@@ -756,31 +726,45 @@ function connect(cb) {
                   }
   
                   objs.push(lobj);
-                  
-                  var value = sensor.state[state];
-                  if (state === 'temperature') {
-                    value = convertTemperature(value);
-                  }
                   states.push({id: lobj._id, val: value});
                }
+
+               objs.push({
+                   _id: adapter.namespace + '.' + channelName.replace(/\s/g, '_'),
+                   type: 'channel',
+                   common: {
+                       name:           channelName.replace(/\s/g, '_'),
+                       role:           sensorCopy.type
+                   },
+                   native: {
+                       id:             sid,
+                       type:           sensorCopy.type,
+                       name:           sensorCopy.name,
+                       modelid:        sensorCopy.modelid,
+                       swversion:      sensorCopy.swversion,
+                   }
+               });
            }
         }
 
-        adapter.log.info('created/updated ' + count + ' switch channels');
-
-        count = 0;
+        adapter.log.info('created/updated ' + pollSensors.length + ' sensor channels');
 
         for (let lid in lights) {
             if (!lights.hasOwnProperty(lid)) {
                 continue;
             }
-            count++;
             let light = lights[lid];
 
             let channelName = config.config.name + '.' + light.name;
             if (channelNames.indexOf(channelName) !== -1) {
-                adapter.log.warn('channel "' + channelName + '" already exists, skipping lamp');
-                continue;
+	        let newChannelName = channelName + ' ' + light.type;
+	        if (channelNames.indexOf(newChannelName) !== -1) {
+                  adapter.log.error('channel "' + channelName.replace(/\s/g, '_') + '" already exists, could not use "' + newChannelName.replace(/\s/g, '_') + '" as well, skipping light ' + lid);
+                  continue;
+                } else {
+                  adapter.log.warn('channel "' + channelName.replace(/\s/g, '_') + '" already exists, using "' + newChannelName.replace(/\s/g, '_') + '" for light ' + lid);
+                  channelName = newChannelName;
+                }
             } else {
                 channelNames.push(channelName);
             }
@@ -941,11 +925,9 @@ function connect(cb) {
             });
 
         }
-        adapter.log.info('created/updated ' + count + ' light channels');
+        adapter.log.info('created/updated ' + pollLights.length + ' light channels');
 
         // Create/update groups
-        adapter.log.info('creating/updating light groups');
-
         if (!adapter.config.ignoreGroups) {
             let groups = config.groups;
             groups[0] = {
@@ -964,18 +946,22 @@ function connect(cb) {
                     xy:     '0,0'
                 }
             };
-            count = 0;
             for (let gid in groups) {
                 if (!groups.hasOwnProperty(gid)) {
                     continue;
                 }
-                count += 1;
                 let group = groups[gid];
 
                 let groupName = config.config.name + '.' + group.name;
                 if (channelNames.indexOf(groupName) !== -1) {
-                    adapter.log.warn('channel "' + groupName + '" already exists, skipping group');
-                    continue;
+	            let newGroupName = groupName + ' ' + group.type;
+	            if (channelNames.indexOf(newGroupName) !== -1) {
+                      adapter.log.error('channel "' + groupName.replace(/\s/g, '_') + '" already exists, could not use "' + newGroupName.replace(/\s/g, '_') + '" as well, skipping group ' + gid);
+                      continue;
+                    } else {
+                      adapter.log.warn('channel "' + groupName.replace(/\s/g, '_') + '" already exists, using "' + newGroupName.replace(/\s/g, '_') + '" for group ' + gid);
+                      groupName = newGroupName;
+                    }
                 } else {
                     channelNames.push(groupName);
                 }
@@ -1110,7 +1096,7 @@ function connect(cb) {
                     }
                 });
             }
-            adapter.log.info('created/updated ' + count + ' light groups');
+            adapter.log.info('created/updated ' + pollGroups.length + ' groups channels');
 
         }
 
@@ -1196,9 +1182,11 @@ function poll() {
     updateLightState(light, 5);
   });
 
-  pollGroups.forEach((group) => {
-    updateGroupState(group, 5);
-  });
+  if (!adapter.config.ignoreGroups) {
+    pollGroups.forEach((group) => {
+      updateGroupState(group, 5);
+    });
+  }
 
   pollSensors.forEach((sensor) => {
     updateSensorState(sensor, 5);
@@ -1226,7 +1214,7 @@ function main() {
       reservoirRefreshInterval: 1*1000 // must be divisible by 250
     });
     groupQueue.on("depleted", function (empty) {
-      adapter.log.info('groupQueue full. Waiting...');
+      adapter.log.debug('groupQueue full. Throttling down...');
     });
     groupQueue.on("error", function (error) {
       adapter.log.error('groupQueue error: ', err);
@@ -1240,7 +1228,7 @@ function main() {
       minTime: 150 // wait 150ms between requests
     });
     lightQueue.on("depleted", function (empty) {
-      adapter.log.info('lightQueue full. Waiting...');
+      adapter.log.debug('lightQueue full. Throttling down...');
     });
     lightQueue.on("error", function (error) {
       adapter.log.error('lightQueue error: ', err);
